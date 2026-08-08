@@ -1,0 +1,109 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Banding — compensation benchmarks that cannot be reverse engineered</title>
+<style>
+  :root{--bg:#fcfcfd;--ink:#14171a;--muted:#5f6a75;--line:#e4e8ec;--card:#fff;
+        --accent:#2f4d8a;--ok:#1f6f4a;--bad:#9c3524;--hide:#f4f0e6;
+        --mono:ui-monospace,SFMono-Regular,"SF Mono",Menlo,monospace;}
+  @media (prefers-color-scheme:dark){
+    :root{--bg:#101317;--ink:#eef1f5;--muted:#93a0ad;--line:#242a31;--card:#171b20;
+          --accent:#7fa3e0;--ok:#77c79b;--bad:#e0917d;--hide:#231f16;}}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--ink);
+       font:15px/1.55 system-ui,-apple-system,"Segoe UI",sans-serif}
+  .wrap{max-width:1000px;margin:0 auto;padding:38px 20px 80px}
+  header{border-bottom:1px solid var(--line);padding-bottom:20px;margin-bottom:24px}
+  h1{font-size:27px;margin:0 0 6px;letter-spacing:-.02em}
+  .sub{color:var(--muted);margin:0}
+  h2{font-size:13px;text-transform:uppercase;letter-spacing:.09em;color:var(--muted);
+     font-family:var(--mono);margin:28px 0 10px}
+  .row{display:flex;gap:10px;align-items:center;flex-wrap:wrap;margin:12px 0}
+  input[type=range]{width:220px}
+  button{padding:8px 14px;border:1px solid var(--accent);border-radius:7px;
+         background:var(--accent);color:#fff;cursor:pointer;font:inherit}
+  .tablewrap{overflow-x:auto;border:1px solid var(--line);border-radius:9px;background:var(--card)}
+  table{border-collapse:collapse;width:100%;min-width:640px}
+  th,td{padding:9px 12px;text-align:left;border-bottom:1px solid var(--line);font-size:14px}
+  th{font-family:var(--mono);font-size:11.5px;text-transform:uppercase;
+     letter-spacing:.06em;color:var(--muted);font-weight:600}
+  td.hidden{background:var(--hide);color:var(--muted);font-style:italic}
+  .n{font-family:var(--mono);font-size:13px}
+  .badge{display:inline-block;padding:2px 9px;border-radius:999px;font-family:var(--mono);
+         font-size:11.5px;border:1px solid var(--line)}
+  .safe{color:var(--ok);border-color:var(--ok)}
+  .leak{color:var(--bad);border-color:var(--bad)}
+  .note{color:var(--muted);font-size:13.5px;margin:8px 0 0}
+  pre{font-family:var(--mono);font-size:12.5px;background:var(--card);border:1px solid var(--line);
+      border-radius:8px;padding:12px;overflow-x:auto;margin:8px 0 0}
+  code{font-family:var(--mono);font-size:.92em}
+</style>
+</head>
+<body>
+<div class="wrap">
+<header>
+  <h1>Banding</h1>
+  <p class="sub">Compensation benchmarks with disclosure control. No cell survives that could be read back to a single contributor.</p>
+</header>
+
+<div class="row">
+  <label>threshold k = <b id="kv">5</b> contributing companies</label>
+  <input type="range" id="k" min="1" max="12" value="5" oninput="load()">
+  <span id="status"></span>
+</div>
+<p class="note">Slide k and watch cells drop out. Note that cells well above the threshold also disappear:
+  that is complementary suppression. A lone withheld cell in an otherwise complete row is recoverable by
+  subtraction, so a second cell in that row has to go too.</p>
+
+<h2>Level by location, base salary</h2>
+<div class="tablewrap"><table id="t"></table></div>
+
+<h2>GraphQL</h2>
+<p class="note">The same table over <code>POST /graphql</code>. Filtering narrows what is returned, never what is suppressed:
+  suppression is decided across the whole table first, so asking only for the thin cell still returns it withheld.</p>
+<pre id="gq">loading…</pre>
+</div>
+
+<script>
+const $ = i => document.getElementById(i);
+const money = v => v === null ? '—' : '$' + v.toLocaleString('en-US');
+
+async function load(){
+  const k = $('k').value;
+  $('kv').textContent = k;
+  const d = await (await fetch('/api/benchmarks?k=' + k)).json();
+
+  const levels = [...new Set(d.cells.map(c => c.level))].sort();
+  const locs   = [...new Set(d.cells.map(c => c.location))].sort();
+  const at = (lv, lo) => d.cells.find(c => c.level === lv && c.location === lo);
+
+  let html = '<tr><th>level</th>' + locs.map(l => '<th>' + l + '</th>').join('') + '</tr>';
+  for (const lv of levels){
+    html += '<tr><th>' + lv + '</th>';
+    for (const lo of locs){
+      const c = at(lv, lo);
+      if (!c){ html += '<td class="hidden">no data</td>'; continue; }
+      html += c.suppressed
+        ? '<td class="hidden" title="' + (c.reason||'') + '">withheld<br><span class="n">' +
+          c.companies + ' companies</span></td>'
+        : '<td><b>' + money(c.p50) + '</b><br><span class="n">' + money(c.p25) + ' – ' +
+          money(c.p75) + '<br>' + c.companies + ' companies, n=' + c.n + '</span></td>';
+    }
+    html += '</tr>';
+  }
+  $('t').innerHTML = html;
+  $('status').innerHTML = d.safe
+    ? '<span class="badge safe">audit clean · ' + d.published + ' published, ' + d.suppressed + ' withheld</span>'
+    : '<span class="badge leak">' + d.audit.length + ' leak(s)</span>';
+
+  const q = '{ benchmarks(k: ' + k + ', level: "L6") { safe audit cells { level location companies p50 suppressed } } }';
+  const g = await (await fetch('/graphql', {method:'POST', headers:{'Content-Type':'application/json'},
+                    body: JSON.stringify({query:q})})).json();
+  $('gq').textContent = q + '\n\n' + JSON.stringify(g, null, 2);
+}
+load();
+</script>
+</body>
+</html>
